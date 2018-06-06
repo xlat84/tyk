@@ -1050,6 +1050,12 @@ func main() {
 
 	mainLog.Info("Stop signal received.")
 
+	//if using async session writes stop workers
+	if config.Global().UseAsyncSessionWrite {
+		DefaultOrgStore.Stop()
+		DefaultQuotaStore.Stop()
+		FallbackKeySesionManager.Stop()
+	}
 	writeProfiles()
 
 	if config.Global().UseDBAppConfigs {

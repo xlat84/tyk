@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/satori/go.uuid"
@@ -35,6 +37,7 @@ type SessionHandler interface {
 	Sessions(filter string) []string
 	Store() storage.Handler
 	ResetQuota(string, *user.SessionState)
+	Stop()
 }
 
 // DefaultAuthorisationManager implements AuthorisationHandler,
@@ -47,6 +50,17 @@ type DefaultSessionManager struct {
 	store                    storage.Handler
 	asyncWrites              bool
 	disableCacheSessionState bool
+	updateChan               chan *SessionUpdate
+	poolSize                 int
+	shouldStop               uint32
+	poolWG                   sync.WaitGroup
+}
+
+type SessionUpdate struct {
+	isHashed bool
+	keyVal   string
+	session  *user.SessionState
+	ttl      int64
 }
 
 func (b *DefaultAuthorisationManager) Init(store storage.Handler) {
@@ -89,6 +103,56 @@ func (b *DefaultSessionManager) Init(store storage.Handler) {
 	b.disableCacheSessionState = config.Global().LocalSessionCache.DisableCacheSessionState
 	b.store = store
 	b.store.Connect()
+
+	if b.asyncWrites {
+		//check pool size in config and set to 50 if unset
+		b.poolSize = config.Global().SessionUpdatePoolSize
+		if b.poolSize <= 0 {
+			b.poolSize = 50
+		}
+
+		log.WithField("Auth Manager", b.poolSize).Debug("Session update async pool size")
+
+		b.updateChan = make(chan *SessionUpdate)
+
+		//start worker pool
+		atomic.SwapUint32(&b.shouldStop, 0)
+		for i := 0; i < b.poolSize; i++ {
+			b.poolWG.Add(1)
+			go b.updateWorker()
+		}
+	}
+}
+
+func (b *DefaultSessionManager) updateWorker() {
+	defer b.poolWG.Done()
+
+	for {
+		//grab update object from channel
+		u, ok := <-b.updateChan
+		//if channel closed return from worker
+		if !ok {
+			return
+		}
+		v, _ := json.Marshal(u.session)
+
+		if u.isHashed {
+			u.keyVal = b.store.GetKeyPrefix() + u.keyVal
+			b.store.SetRawKey(u.keyVal, string(v), u.ttl)
+
+		}
+
+		b.store.SetKey(u.keyVal, string(v), u.ttl)
+	}
+}
+
+func (b *DefaultSessionManager) Stop() {
+	//flag to stop adding data to chan
+	atomic.SwapUint32(&b.shouldStop, 1)
+	//close update channel
+	close(b.updateChan)
+	//wait for workers to finish
+	b.poolWG.Wait()
 }
 
 func (b *DefaultSessionManager) Store() storage.Handler {
@@ -120,23 +184,30 @@ func (b *DefaultSessionManager) UpdateSession(keyName string, session *user.Sess
 		return nil
 	}
 
+	// async update and return if needed
+	if b.asyncWrites {
+		if atomic.LoadUint32(&b.shouldStop) > 0 {
+			return nil
+		}
+		b.renewSessionState(keyName, session)
+
+		sessionMeta := &SessionUpdate{
+			isHashed: hashed,
+			keyVal:   keyName,
+			session:  session,
+			ttl:      resetTTLTo,
+		}
+
+		//send sessionupdate object through channel and do hard work in the pool
+		b.updateChan <- sessionMeta
+
+		return nil
+	}
+
 	v, _ := json.Marshal(session)
 
 	if hashed {
 		keyName = b.store.GetKeyPrefix() + keyName
-	}
-
-	// async update and return if needed
-	if b.asyncWrites {
-		b.renewSessionState(keyName, session)
-
-		if hashed {
-			go b.store.SetRawKey(keyName, string(v), resetTTLTo)
-			return nil
-		}
-
-		go b.store.SetKey(keyName, string(v), resetTTLTo)
-		return nil
 	}
 
 	// sync update
