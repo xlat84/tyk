@@ -44,6 +44,7 @@ import (
 	"github.com/TykTechnologies/tyk/config"
 	"github.com/TykTechnologies/tyk/lint"
 	logger "github.com/TykTechnologies/tyk/log"
+	"github.com/TykTechnologies/tyk/regexp"
 	"github.com/TykTechnologies/tyk/storage"
 	"github.com/TykTechnologies/tyk/user"
 )
@@ -166,7 +167,7 @@ func setupGlobals() {
 
 		analyticsStore := storage.RedisCluster{KeyPrefix: "analytics-"}
 		analytics.Store = &analyticsStore
-		analytics.Init()
+		analytics.Init(globalConf)
 
 		redisPurgeOnce.Do(func() {
 			store := storage.RedisCluster{KeyPrefix: "analytics-"}
@@ -894,6 +895,7 @@ func afterConfSetup(conf *config.Config) {
 	GlobalRPCPingTimeout = time.Second * time.Duration(conf.SlaveOptions.PingTimeout)
 	GlobalRPCCallTimeout = time.Second * time.Duration(conf.SlaveOptions.CallTimeout)
 	initGenericEventHandlers(conf)
+	regexp.ResetCache(time.Second*time.Duration(conf.RegexpCacheExpire), !conf.DisableRegexpCache)
 }
 
 var hostDetails struct {
@@ -1056,6 +1058,12 @@ func main() {
 		DefaultQuotaStore.Stop()
 		FallbackKeySesionManager.Stop()
 	}
+	// stop analytics workers
+	if config.Global().EnableAnalytics && analytics.Store == nil {
+		analytics.Stop()
+	}
+
+	// write pprof profiles
 	writeProfiles()
 
 	if config.Global().UseDBAppConfigs {

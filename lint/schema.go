@@ -98,6 +98,9 @@ const confSchema = `{
 			"pool_size": {
 				"type": "integer"
 			},
+			"records_buffer_size": {
+				"type": "integer"
+			},
 			"storage_expiration_time": {
 				"type": "integer"
 			},
@@ -735,6 +738,12 @@ const confSchema = `{
 		"type": "boolean"
 	},
 	"min_token_length": {
+		"type": "integer"
+ 	},
+	"disable_regexp_cache": {
+		"type": "boolean"
+	},
+	"regexp_cache_expire": {
 		"type": "integer"
  	}
 }
